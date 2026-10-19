@@ -11,3 +11,9 @@ __pycache__/
 .vercel/
 coverage/
 .DS_Store
+
+*.db
+*.db-*
+
+frontend/test-results/
+frontend/playwright-report/

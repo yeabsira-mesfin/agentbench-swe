@@ -1,154 +1,254 @@
-# AgentBench SWE
+# AgentBench Pro
 
-A versioned review workbench for evaluating coding-agent solutions across correctness, security, regression safety, and engineering quality.
+An evidence-first coding-agent evaluation workspace built with React, TypeScript,
+FastAPI and PostgreSQL. Extends AgentBench SWE in the same repository, preserving
+its reviewer-attested APIs and Git history.
 
 [![CI](https://github.com/yeabsira-mesfin/agentbench-swe/actions/workflows/ci.yml/badge.svg)](https://github.com/yeabsira-mesfin/agentbench-swe/actions)
 
-**Live demo:** [https://agentbench-swe.vercel.app/](https://agentbench-swe.vercel.app/) · **GitHub Pages:** [Open demo](https://yeabsira-mesfin.github.io/agentbench-swe/) · **API health:** [Check API](https://agentbench-swe.vercel.app/health)
+**Execution boundary:** this release executes only bundled, developer-authored
+Python fixtures. Imported model solutions are persisted and inspected, **never
+executed**. There is no verified untrusted-code sandbox installed. A disabled
+sandbox interface is provided for a future isolated worker. Docker application
+containers are not an arbitrary-code security boundary.
 
-## Why this exists
+The existing [hosted demo](https://agentbench-swe.vercel.app/) may still run the
+previous reviewer workbench until this branch is deployed. No new production
+deployment or model benchmark performance is claimed.
 
-A compiling patch can still break authorization or introduce a regression. This project makes the review criteria, weighting, evidence, and release gates explicit so an evaluator can explain their judgment.
+## What works
 
-## Important features
+- Overview with persisted run counts, fixture pass rate, failures and recent runs.
+- Eight original versioned benchmarks, searchable by task and language.
+- Six executable Python fixture tasks: functions, pure REST handler contracts,
+  tenant authorization, SQL parameter handling, validation and pagination regressions.
+- JavaScript and TypeScript task specifications with import-only support.
+- Reference and intentionally faulty fixtures exercise visible and held-out assertions.
+- Imported solutions with model, version and provider labels; optional reported
+  token/cost metadata stays explicitly unverified and missing values stay unavailable.
+- Separate correctness, regression, security, reliability, code-quality and
+  documentation evidence fields. Unmeasured dimensions never receive invented scores.
+- Private history, report retrieval, JSON export and grouped comparison tables.
+- Limited Python AST/source security inspection with explicit coverage limits.
+- SQLite for native development; PostgreSQL via SQLAlchemy and Docker Compose.
+- Original human-review workbench and `/evaluate`, `/api/evaluate`, `/api/tasks`
+  contracts retained separately.
 
-- Six curated tasks covering authentication, API design, SQL performance, Java authorization, React effects, and deployment readiness.
-- Five task-specific visible criteria per task and a versioned five-dimension rubric.
-- Server-only structural security and regression gates, separate from the numeric score.
-- Reviewer evidence captured in a downloadable JSON report.
-- Bounded, validated requests; no code upload, shell execution, or model API requirement.
-- Existing `/evaluate` numeric scoring contract preserved.
+![Local AgentBench Pro comparison workspace](docs/screenshots/pro-desktop.png)
+
+Screenshot contains local fixture/test submissions, not measured model performance.
+
+## Evidence model
+
+| Evidence | Meaning | What it cannot establish |
+| --- | --- | --- |
+| `trusted_fixture` | Actual assertions against bundled functions | Performance of an imported model solution |
+| `imported` | Stored source, source hash, limited static inspection | Correctness, regression safety or execution time |
+| `reviewer_attested` | Human assertions under the original rubric | Independently measured test results |
+| `user_supplied_unverified` usage | Optional imported token/cost metadata | Provider-verified billing or telemetry |
+
+Fixture model labels are assigned by the server so a caller cannot label a
+bundled baseline as an independently evaluated AI model. Fixture durations measure
+local harness execution only, not inference latency or general application speed.
+
+### Scoring and release decisions
+
+The Pro policy weights available measured dimensions: correctness 60%, regression
+safety 25%, single-run reliability 15%. Weights renormalize across available
+non-null dimensions. Security is a separate veto, not numeric compensation.
+Code quality and documentation remain unavailable in executable reports; use the
+separate human-review workbench for explicit reviewer attestations.
+
+- Any failed assertion produces `rejected`, even with a score of 100.
+- All fixture assertions passing produces `review_required`, not production approval.
+- Imported code produces `blocked` with no executed tests, score or duration.
+- Infrastructure errors produce `failed` and block approval.
+- `release_ready` is always false for Pro runs because independent security and
+  engineering reviews are not linked into a verified approval workflow.
+
+Overview pass rate is **completed fixture runs with zero failures / completed
+fixture runs**. Imported and infrastructure-failed runs are excluded from that
+metric and counted separately. Comparisons never combine different tasks,
+datasets, modes, models, providers, policies or engine hashes. These small original
+fixtures are demonstration coverage, not a statistically representative leaderboard.
 
 ## Architecture
 
-The React client calls a stateless scoring API. Curated task/rule definitions and score policies live in the backend. Production requests use the same-origin API by default; local development defaults to the backend port. No database, credential, or paid AI API is needed.
-
 ```mermaid
 flowchart TD
- UI["React / TypeScript workbench"] --> API["FastAPI API"]
- API --> Registry["Curated definitions"]
- API --> Engine["Deterministic scoring"]
- Engine --> Report["Structured report"]
+  UI["React workspace"] --> API["FastAPI validation and token access"]
+  API --> Registry["Versioned benchmark registry"]
+  API --> DB["PostgreSQL or SQLite evidence store"]
+  API --> Mode{"Submission mode"}
+  Mode -->|Bundled fixture| Checks["Trusted functions and assertions"]
+  Mode -->|Imported source| Scan["Static inspection; execution blocked"]
+  Checks --> Report["Evidence and release gates"]
+  Scan --> Report
+  Report --> DB
 ```
 
-## Technology stack
+`backend/app/pro/` contains the registry, trusted fixtures, engine, scanner,
+persistence, API, request-size limit and disabled sandbox protocol.
+`frontend/src/ReviewWorkbench.tsx` preserves the original human-review UI.
+`frontend/src/RunReport.tsx` renders measured evidence and provenance.
 
-React, TypeScript, Vite, Python 3.12, FastAPI, Pydantic, pytest, Docker, GitHub Actions.
+## Run locally
 
-## Evaluation methodology
+Requirements: Python 3.12+, Node.js 22+. No model provider account is needed.
 
-This is a **reviewer-attested structured evaluation**, not an autonomous agent runner. An evaluator inspects a proposed solution outside the demo and marks only criteria supported by evidence. Correctness averages the first two criteria; security uses the security criterion; test quality averages the verification and regression criteria; maintainability and documentation are explicit reviewer attestations.
+1. Generate a private workspace token and save it locally, never in source control:
 
-`total = 0.40 correctness + 0.20 security + 0.15 tests + 0.15 maintainability + 0.10 documentation`
+   ```bash
+   python -c 'import secrets; print(secrets.token_hex(32))'
+   ```
 
-Release readiness additionally requires both correctness criteria, the security criterion, and the regression criterion. A high numeric score can fail a release gate. The gate policy lives on the server, but **it is not a hidden executable test suite**. Visible and held-out executable candidate tests are a future extension requiring disposable isolation. Current pytest tests verify the evaluation contract itself. No real model comparison, pass rate, runtime, or candidate test count is reported.
+2. Start the backend:
 
-## Example
+   ```bash
+   cd backend
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   export AGENTBENCH_API_TOKEN='paste-your-generated-token-here'
+   export DATABASE_URL='sqlite:///./agentbench.db'
+   python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+   ```
 
-```bash
-curl http://localhost:8000/api/evaluate -H 'Content-Type: application/json' -d '{"task_id":"AUTH-101","satisfied_checks":["c0","c1","c3","c4"],"explanation":"Atomic rotation reviewed; replay detection remains unsupported.","maintainability":true,"documentation":true}'
-```
-This input deterministically scores 80/100 and fails the security release gate. That score describes the submitted attestations, not measured agent performance.
+3. In another terminal:
 
-## Security considerations
+   ```bash
+   cd frontend
+   npm ci
+   npm run dev
+   ```
 
-- Submitted content is treated as data. There is no `eval`, shell execution of submissions, arbitrary repository checkout, or candidate code execution.
-- Requests are bounded and validated; UI requests time out and surface errors.
-- APIs are public, stateless demonstration endpoints. CORS permits configured origins, but CORS is not authentication. Configure `ALLOWED_ORIGINS` as a comma-separated list of exact frontend origins for cross-origin hosting.
-- No secrets are required. `VITE_` variables are public bundle contents; use `VITE_API_BASE_URL` only for an API URL.
-- Do not submit private code, customer data, or real credentials. The application does not intentionally persist submissions, but hosting providers can retain request/access metadata.
-- Hosting-level rate limits and abuse controls are needed before wider public traffic. Future executable evaluation must use disposable, isolated environments with resource limits, restricted networking, and no production credentials. The ordinary application Dockerfiles are not an untrusted-code sandbox.
+Open `http://localhost:5173`, expand **Connect private workspace** and enter the
+same token. It stays in tab memory, not localStorage. Select **Benchmarks**, inspect
+**Tenant access boundary**, and run the faulty fixture to see security failures
+veto a high numeric score. Run the reference fixture, import a solution, then
+compare and reopen the saved reports.
 
-## Project structure
+Without a server token of at least 32 characters, private APIs return 503. The
+public catalog and legacy reviewer endpoints remain available. This is a single
+trusted workspace, not multi-user authentication or tenant isolation.
 
-```text
-frontend/src/App.tsx       Task review UI and JSON export
-frontend/src/api.ts        Typed requests and timeouts
-backend/app/tasks.py       Versioned curated task definitions
-backend/app/evaluator.py   Weighted score engine
-backend/app/main.py        Validated API and structural gates
-backend/tests/            Evaluator and API contract tests
-.github/workflows/ci.yml   Build and backend tests
-vercel.json               Frontend/backend service routing
-docker-compose.yml       Local same-origin demo
-```
+### PostgreSQL and Compose
 
-## Local setup
-
-Requirements: Node.js 22, Python 3.12. Start backend and frontend in separate terminals.
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
-```
-
-```bash
-cd frontend
-npm ci
-npm run dev
-```
-
-Open `http://localhost:5173`. The API listens at `http://localhost:8000`. If overriding the API location, copy `frontend/.env.example` to `frontend/.env.local` and set `VITE_API_BASE_URL`. Restart Vite after changing it.
-
-For the same-origin Docker demo:
+Copy `.env.example` to `.env`. Set independent random hexadecimal values for
+`AGENTBENCH_API_TOKEN` and `POSTGRES_PASSWORD` (the password is embedded in a URL).
+Then run:
 
 ```bash
 docker compose up --build
 ```
 
-Open `http://localhost:5173`. Nginx proxies API requests to the backend and serves SPA deep links. Docker configuration is provided; consult the QA notes for whether a container build was actually run.
+Open `http://localhost:5173`. The database has a durable named volume and no
+published port; web/API ports bind only to loopback. The API runs non-root with a
+read-only filesystem, dropped capabilities and no Docker socket. Those protections
+harden the application; they do not enable submitted-code execution.
 
-## Testing
+Native PostgreSQL users can set
+`DATABASE_URL=postgresql+psycopg://user:password@host:5432/agentbench`.
+The additive `pro_evaluations_v1` table is initialized automatically. Future schema
+changes require deliberate migrations; do not change the table contract in place.
+
+## API
+
+Catalog and capabilities are public. All other `/api/pro` routes require
+`Authorization: Bearer <workspace-token>` and return `Cache-Control: no-store`.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/pro/capabilities` | Execution boundary and workspace configuration state |
+| `GET /api/pro/benchmarks` | Public task specifications and visible assertions only |
+| `POST /api/pro/evaluations` | Validate, persist, evaluate or inspect, save report |
+| `GET /api/pro/evaluations` | Search/paginate history using q, task_id, language, dataset_version, offset, limit |
+| `GET /api/pro/evaluations/{id}` | Private complete report and original submitted source |
+| `GET /api/pro/overview` | Totals with explicit fixture-only pass-rate denominator |
+| `GET /api/pro/comparisons` | Grouped evidence with task/language/version filters |
+
+Example request body for a trusted fixture:
+
+```json
+{"task_id":"AUTH-001","dataset_version":"1.0.0","mode":"trusted_fixture","fixture_id":"broken"}
+```
+
+Example imported solution (stored and statically inspected, never run):
+
+```json
+{"task_id":"PY-001","dataset_version":"1.0.0","mode":"imported","source":"def solve(values):\n    return list(dict.fromkeys(values))","model_label":"Human baseline","model_version":"v1"}
+```
+
+Submissions are bounded to 20,000 source characters and 100 KB streamed request
+bodies. A mismatched dataset version returns 409. Tokens/costs are optional and
+are rejected for bundled fixtures. Database failures return sanitized 503 errors.
+No model-provider API keys are accepted or bundled into the browser.
+
+## Security and limitations
+
+- Imported code is never passed to `eval`, `exec`, subprocesses or SQL execution.
+  SQL behavior tests use fixed developer-authored fixture queries against in-memory
+  synthetic data only. Faulty fixtures are deliberate regression examples.
+- Held-out inputs and expected outputs are omitted from catalog/report endpoints
+  and frontend assets. Reports expose only opaque held-out IDs and outcomes.
+  **The public Git repository contains these fixtures**, so they are not secret
+  and cannot support contamination-resistant benchmark claims. A real private
+  dataset must be provisioned outside the public repository.
+- Python inspection detects a small set of direct dangerous calls and SQL
+  interpolation patterns. It does not follow aliases/data flow; JavaScript and
+  TypeScript scanning is explicitly unsupported. No findings is not a safety pass.
+- No arbitrary runner ships. `sandbox.py` defines a fail-closed integration
+  interface. Before enabling one, independently verify disposable non-root
+  execution, no network/credentials/host mounts, read-only root, bounded writable
+  space, CPU/memory/PID/output caps, external deadlines and cleanup. Prefer a
+  microVM or hardened sandbox over bare Docker. Assertions must be controlled by
+  the evaluator; never trust candidate-reported pass counts.
+- Executions are short synchronous trusted checks. A server interruption can
+  leave a persisted `running` record; there is no durable background queue or
+  automatic retry. Such records never count as measured or approved.
+- History uses application-side filtering over stored JSON and is suitable for a
+  small private workspace. Large installations need indexed fields, database-side
+  pagination/aggregation, retention, backups and migrations.
+- Shared-token authorization is not a multi-user system. All token holders can
+  read all stored submissions. Use a private network; add proper identity/RBAC,
+  quotas, rate limiting and retention before shared public workspace exposure.
+- Do not import secrets. Source is retained in the configured database until an
+  operator removes it. Restrict database access and backups accordingly.
+
+## Verification
 
 ```bash
+PYTHONPATH=backend python -m pytest backend/tests -q
+npm ci --prefix frontend
+npm run build --prefix frontend
 cd frontend
-npm ci
-npm run build   # includes strict TypeScript checking
+npx playwright install chromium
+npm run test:e2e
 ```
 
-```bash
-cd backend
-PYTHONPATH=. python -m pytest
-```
+The browser test starts its own local API/UI, uses an explicitly test-only token
+and `backend/browser-test.db`, and checks fixture gates, blocked imports, history,
+comparisons, mobile layout and the original reviewer workflow. Test data is not
+production evidence. CI runs Python tests against SQLite and PostgreSQL, checks
+the frontend build, and exercises browser flows.
 
-[QA notes](docs/QA.md) record actual checks and limitations. CI installs from committed npm lockfiles. Test results are software verification, not benchmark/model evaluation data.
+See [QA evidence](docs/QA-PRO.md) for actual executed checks and unverified items.
 
 ## Deployment
 
-**Vercel:** import this repository with the repository root selected. `vercel.json` defines the React frontend plus the existing backend as separate services. Services are currently Beta. RepoDoctor uses a Java container, DebugArena uses an Express container, and the Python projects use FastAPI services. API routes precede the frontend catch-all. Production defaults to a same-origin API, avoiding cross-origin configuration and localhost leakage. If deploying the frontend alone, select `frontend` as root and set `VITE_API_BASE_URL` to the deployed API origin before building.
+Existing Vercel service routing and GitHub Pages publishing remain intact. Deploy
+this branch only after provisioning backend `AGENTBENCH_API_TOKEN` and a persistent
+PostgreSQL `DATABASE_URL` for private features. On Vercel, private APIs explicitly
+reject SQLite or a missing PostgreSQL URL to prevent ephemeral-history claims.
+Frontend-only hosting needs `VITE_API_BASE_URL` pointing to the backend. Never put
+the workspace token or database credentials in a `VITE_` variable.
 
-**Alternative API hosting:** use the backend Dockerfile on a provider supporting that runtime, such as Render. Set `ALLOWED_ORIGINS` to the exact frontend URL and set the frontend public API origin. RepoDoctor accepts `PORT`; use the Dockerfile's documented port for Python/Node deployments or override the startup command.
-
-**GitHub Pages:** Pages can host only the static React frontend, not Python/Node/Java APIs. Pages is enabled with GitHub Actions. The workflow runs on main-branch pushes or manual dispatch and uses the deployed Vercel API by default. Set repository variable `PUBLIC_API_BASE_URL` to override that public origin. The build derives its base path from the repository name so renamed repositories retain working assets. Without a hosted API it cannot provide the interactive evaluator.
-
-Free-tier terms are time-sensitive. Current official references: [Vercel Hobby](https://vercel.com/docs/plans/hobby), [Vercel Services pricing](https://vercel.com/docs/services/pricing), [Render free services](https://render.com/docs/free), and [GitHub Pages limits](https://docs.github.com/en/pages/getting-started-with-github-pages/github-pages-limits). Hobby has usage caps and personal/noncommercial restrictions. Render free web services have sleep/usage limits. No provider is claimed to be permanently free.
-
-## Screenshots and demo
-
-Live Vercel deployment:
-
-![Live flagship workbench](docs/screenshots/live.jpg)
-
-Actual screenshots from the production build running locally against its backend:
-
-![Desktop workbench](docs/screenshots/desktop.webp)
-
-[Mobile screenshot](docs/screenshots/mobile.webp) · [QA notes](docs/QA.md)
-
-These show curated fixture evaluations, not measured model performance. Both public demos use the hosted backend. See [verified deployment checks](docs/deployment-checks.json).
-
-## What this demonstrates professionally
-
-AI evaluation design, explicit rubrics, review evidence, safe public demonstration boundaries, Python APIs, React/TypeScript, automated validation, and CI/CD configuration.
-
-## Limitations
-
-Manual attestations cannot prove a patch works. No candidate code is executed, no agent integration or independent held-out candidate tests exist, and reports are not persisted.
+Public visitors can browse the catalog and use the legacy attestation workflow;
+private reports require the workspace token. Arbitrary-code execution remains
+disabled in every deployment, regardless of environment variables.
 
 ## Author
 
-**Yeabsira Mesfin**
-Full Stack Software Engineer · M.S. Cybersecurity in Computer Science student
+**Yeabsira Mesfin** · Full Stack Software Engineer · M.S. Cybersecurity in Computer
+Science student. Demonstrates evaluation design, explicit provenance, secure API
+boundaries, persistence, reproducible tests and a React evaluation workspace.

@@ -1,327 +1,906 @@
 import { useEffect, useState } from "react";
-import { Bot, ShieldCheck, Download, CheckCircle2 } from "lucide-react";
+import {
+  Activity,
+  ArrowRight,
+  Beaker,
+  Bot,
+  Clock3,
+  GitCompareArrows,
+  LayoutDashboard,
+  LockKeyhole,
+  Search,
+  ShieldCheck,
+} from "lucide-react";
 import { request } from "./api";
-type Task = {
-  id: string;
-  title: string;
-  language: string;
-  category: string;
-  difficulty: string;
-  description: string;
-  context: string;
-  starter_code: string;
-  checks: { id: string; label: string }[];
-};
-type Report = {
-  score: number;
-  grade: string;
-  task_id: string;
-  release_ready: boolean;
-  dimensions: Record<string, number>;
-  gates: Record<string, boolean>;
-  limitation: string;
-};
+import ReviewWorkbench from "./ReviewWorkbench";
+import RunReport from "./RunReport";
+import {
+  metric,
+  type Benchmark,
+  type Comparison,
+  type Overview,
+  type Run,
+} from "./pro";
+
+type View =
+  | "Overview"
+  | "Benchmarks"
+  | "Workspace"
+  | "Comparisons"
+  | "History"
+  | "Human review";
+const views: [View, typeof Activity][] = [
+  ["Overview", LayoutDashboard],
+  ["Benchmarks", Beaker],
+  ["Workspace", Activity],
+  ["Comparisons", GitCompareArrows],
+  ["History", Clock3],
+  ["Human review", ShieldCheck],
+];
 export default function App() {
-  const [tasks, setTasks] = useState<Task[]>([]),
-    [selected, setSelected] = useState<Task | null>(null),
-    [filter, setFilter] = useState("All");
-  const [checks, setChecks] = useState<string[]>([]),
-    [explanation, setExplanation] = useState(""),
-    [maintainability, setMaintainability] = useState(false),
-    [documentation, setDocumentation] = useState(false);
-  const [result, setResult] = useState<Report | null>(null),
-    [error, setError] = useState(""),
-    [loading, setLoading] = useState(true),
-    [busy, setBusy] = useState(false);
-  async function load() {
-    setLoading(true);
+  const [view, setView] = useState<View>("Overview");
+  const [benchmarks, setBenchmarks] = useState<Benchmark[]>([]);
+  const [selectedId, setSelectedId] = useState("PY-001");
+  const selected = benchmarks.find((t) => t.id === selectedId);
+  const [token, setToken] = useState("");
+  const [draftToken, setDraftToken] = useState("");
+  const [configured, setConfigured] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [history, setHistory] = useState<Run[]>([]);
+  const [total, setTotal] = useState(0);
+  const [offset, setOffset] = useState(0);
+  const [comparison, setComparison] = useState<Comparison[]>([]);
+  const [query, setQuery] = useState("");
+  const [language, setLanguage] = useState("");
+  const [taskFilter, setTaskFilter] = useState("");
+  const [version, setVersion] = useState("");
+  const [mode, setMode] = useState("trusted_fixture");
+  const [fixture, setFixture] = useState("reference");
+  const [source, setSource] = useState("");
+  const [model, setModel] = useState("Human baseline");
+  const [modelVersion, setModelVersion] = useState("unspecified");
+  const [provider, setProvider] = useState("");
+  const [tokens, setTokens] = useState("");
+  const [cost, setCost] = useState("");
+  const [run, setRun] = useState<Run | null>(null);
+  const [revision, setRevision] = useState(0);
+  const auth = { Authorization: `Bearer ${token}` };
+  async function loadCatalog() {
+    setCatalogLoading(true);
     setError("");
     try {
-      const data = await request<Task[]>("/api/tasks");
-      setTasks(data);
-      setSelected(data[0] ?? null);
+      const [tasks, caps] = await Promise.all([
+        request<Benchmark[]>("/api/pro/benchmarks"),
+        request<{ workspace_configured: boolean }>("/api/pro/capabilities"),
+      ]);
+      setBenchmarks(tasks);
+      setConfigured(caps.workspace_configured);
     } catch (e) {
       setError((e as Error).message);
     } finally {
-      setLoading(false);
+      setCatalogLoading(false);
     }
   }
   useEffect(() => {
-    void load();
+    void loadCatalog();
   }, []);
   useEffect(() => {
-    setChecks([]);
-    setExplanation("");
-    setMaintainability(false);
-    setDocumentation(false);
-    setResult(null);
+    if (!token) return;
+    let cancelled = false;
+    const params = new URLSearchParams({
+      q: query,
+      task_id: taskFilter,
+      language,
+      dataset_version: version,
+      offset: String(offset),
+    });
+    const path =
+      view === "Comparisons"
+        ? `/api/pro/comparisons?${params}`
+        : view === "History"
+          ? `/api/pro/evaluations?${params}`
+          : "/api/pro/overview";
     setError("");
-  }, [selected?.id]);
-  function chooseCategory(category: string) {
-    setFilter(category);
-    const first = tasks.find(
-      (t) => category === "All" || t.category === category,
+    request<Overview | Comparison[] | { items: Run[]; total: number }>(path, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((data) => {
+        if (cancelled) return;
+        if (Array.isArray(data)) setComparison(data);
+        else if ("items" in data) {
+          setHistory(data.items);
+          setTotal(data.total);
+        } else setOverview(data);
+      })
+      .catch((e) => {
+        if (!cancelled) setError((e as Error).message);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, view, query, language, taskFilter, version, offset, revision]);
+  function choose(task: Benchmark) {
+    setSelectedId(task.id);
+    setMode(
+      task.execution_support === "trusted_fixture"
+        ? "trusted_fixture"
+        : "imported",
     );
-    if (first) setSelected(first);
+    setRun(null);
+    setView("Workspace");
   }
   async function evaluate() {
     if (!selected) return;
     setBusy(true);
     setError("");
-    setResult(null);
+    setRun(null);
     try {
-      setResult(
-        await request<Report>("/api/evaluate", {
+      const body = {
+        task_id: selected.id,
+        dataset_version: selected.dataset_version,
+        mode,
+        ...(mode === "trusted_fixture"
+          ? { fixture_id: fixture }
+          : {
+              source,
+              model_label: model,
+              model_version: modelVersion,
+              provider: provider || null,
+              tokens: tokens === "" ? null : Number(tokens),
+              cost_usd: cost === "" ? null : Number(cost),
+            }),
+      };
+      setRun(
+        await request<Run>("/api/pro/evaluations", {
           method: "POST",
-          body: JSON.stringify({
-            task_id: selected.id,
-            satisfied_checks: checks,
-            explanation,
-            maintainability,
-            documentation,
-          }),
+          headers: auth,
+          body: JSON.stringify(body),
         }),
       );
+      setRevision((x) => x + 1);
     } catch (e) {
       setError((e as Error).message);
     } finally {
       setBusy(false);
     }
   }
-  function download() {
-    if (!result) return;
-    const url = URL.createObjectURL(
-      new Blob([JSON.stringify(result, null, 2)], { type: "application/json" }),
+  async function openRun(id: string) {
+    setError("");
+    try {
+      const result = await request<Run>(`/api/pro/evaluations/${id}`, {
+        headers: auth,
+      });
+      setRun(result);
+      setView("History");
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  function navigate(next: View) {
+    setView(next);
+    setQuery("");
+    setLanguage("");
+    setTaskFilter("");
+    setVersion("");
+    setOffset(0);
+    setRun(null);
+  }
+  const filtered = benchmarks.filter(
+    (t) =>
+      (!language || t.language === language) &&
+      `${t.title} ${t.category} ${t.id}`
+        .toLowerCase()
+        .includes(query.toLowerCase()),
+  );
+  function runTable(rows: Run[]) {
+    return rows.length ? (
+      <div className="table">
+        <table>
+          <thead>
+            <tr>
+              <th>Benchmark / submission</th>
+              <th>Evidence</th>
+              <th>Status</th>
+              <th>Tests</th>
+              <th>Gate</th>
+              <th>Report</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.id}>
+                <td>
+                  <strong>{r.task_title}</strong>
+                  <small>{r.model_label}</small>
+                </td>
+                <td>{r.mode.replace(/_/g, " ")}</td>
+                <td>{r.status}</td>
+                <td>
+                  {r.executed_tests
+                    ? `${r.passed}/${r.executed_tests}`
+                    : "Not executed"}
+                </td>
+                <td>
+                  <span
+                    className={`badge ${r.release_gate === "rejected" ? "bad" : ""}`}
+                  >
+                    {r.release_gate?.replace(/_/g, " ") ?? "Pending"}
+                  </span>
+                </td>
+                <td>
+                  <button
+                    className="textButton"
+                    onClick={() => void openRun(r.id)}
+                    aria-label={`Open report ${r.id}`}
+                  >
+                    Open <ArrowRight size={14} />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    ) : (
+      <div className="empty">
+        <Beaker />
+        <h3>No evaluations yet</h3>
+        <p>
+          Run a bundled fixture or import a solution to create an evidence
+          record.
+        </p>
+        <button className="primary" onClick={() => navigate("Benchmarks")}>
+          Explore benchmarks
+        </button>
+      </div>
     );
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${result.task_id}-review.json`;
-    a.click();
-    URL.revokeObjectURL(url);
   }
   return (
-    <main className="shell">
-      <nav>
-        <div className="brand">
+    <div className="proApp">
+      <aside className="sidebar">
+        <a className="brand" href="#" onClick={() => navigate("Overview")}>
           <Bot />
-          <span>AgentBench SWE</span>
-        </div>
-        <a
-          href="https://github.com/yeabsira-mesfin/agentbench-swe"
-          target="_blank"
-          rel="noreferrer"
-        >
-          Source code
+          <span>
+            AgentBench <b>Pro</b>
+          </span>
         </a>
-      </nav>
-      <section className="hero">
-        <div>
-          <span className="eyebrow">CODING AGENT EVALUATION WORKBENCH</span>
-          <h1>Evaluate the engineering behind the answer.</h1>
-          <p>
-            Inspect realistic tasks, record review evidence, and produce a
-            weighted assessment of correctness, security, regression safety, and
-            engineering quality.
-          </p>
-          <div className="heroActions">
+        <span className="sideLabel">EVALUATION PLATFORM</span>
+        <nav aria-label="Workspace navigation">
+          {views.map(([name, Icon]) => (
             <button
-              onClick={() =>
-                document
-                  .getElementById("tasks")
-                  ?.scrollIntoView({ behavior: "smooth" })
-              }
+              key={name}
+              aria-current={view === name ? "page" : undefined}
+              className={view === name ? "active" : ""}
+              onClick={() => navigate(name)}
             >
-              Explore tasks
+              <Icon size={18} />
+              {name}
             </button>
-            <span>
-              <ShieldCheck size={17} /> No submitted code execution
-            </span>
-          </div>
-        </div>
-        <div className="scoreCard">
-          <span>Evaluation contract</span>
-          <strong>5</strong>
-          <small>weighted quality dimensions</small>
+          ))}
+        </nav>
+        <div className="sideFoot">
+          <ShieldCheck size={18} />
+          <b>Execution boundary</b>
           <p>
-            Correctness 40% · Security 20% · Tests 15% · Maintainability 15% ·
-            Documentation 10%
+            Trusted fixtures only.
+            <br />
+            Imported code never runs.
           </p>
-          <p className="notice">
-            Structured review demo. No model runs or candidate test results are
-            claimed.
-          </p>
+          <a
+            href="https://github.com/yeabsira-mesfin/agentbench-swe"
+            target="_blank"
+            rel="noreferrer"
+          >
+            View source ↗
+          </a>
         </div>
-      </section>
-      <section id="tasks" className="panel">
-        <div className="sectionHead">
-          <div>
-            <span className="eyebrow">CURATED ENGINEERING TASKS</span>
-            <h2>Task library</h2>
-          </div>
-          <div className="filters">
-            {["All", ...new Set(tasks.map((t) => t.category))].map((c) => (
-              <button
-                aria-pressed={filter === c}
-                disabled={busy}
-                className={filter === c ? "active" : ""}
-                key={c}
-                onClick={() => chooseCategory(c)}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        </div>
-        {loading && <p role="status">Loading task registry...</p>}
-        {error && (
-          <div role="alert" className="error">
-            {error}
-            {!tasks.length && (
-              <button onClick={() => void load()}>Retry</button>
-            )}
-          </div>
-        )}
-        {!loading && !error && !tasks.length && <p>No tasks are available.</p>}
-        <div className="taskLayout">
-          <div className="taskList">
-            {tasks
-              .filter((t) => filter === "All" || t.category === filter)
-              .map((t) => (
-                <button
-                  disabled={busy}
-                  aria-pressed={selected?.id === t.id}
-                  key={t.id}
-                  onClick={() => setSelected(t)}
-                  className={`task ${selected?.id === t.id ? "selected" : ""}`}
-                >
-                  <span className="taskTop">
-                    <b>{t.id}</b>
-                    <em>{t.difficulty}</em>
-                  </span>
-                  <strong>{t.title}</strong>
-                  <small>
-                    {t.language} · {t.category}
-                  </small>
-                </button>
-              ))}
-          </div>
-          {selected && (
-            <article className="detail">
-              <span className="eyebrow">
-                {selected.id} / {selected.language}
-              </span>
-              <h3>{selected.title}</h3>
-              <p>{selected.description}</p>
-              <div className="rubric">
-                <span>Evidence supplied by the scenario</span>
-                <p>{selected.context}</p>
-              </div>
-              <h4>Curated starter code</h4>
-              <pre className="starter">{selected.starter_code}</pre>
-              <h4>Visible review criteria</h4>
+      </aside>
+      <div className="proMain">
+        <header className="topbar">
+          <span>
+            Workspace / <strong>{view}</strong>
+          </span>
+          <span className="badge good">Dataset 1.0.0</span>
+        </header>
+        <main className="proContent">
+          <div className="pageHeading">
+            <div>
+              <span className="eyebrow">MEASURE. INSPECT. COMPARE.</span>
+              <h1>
+                {view === "Overview"
+                  ? "Evidence before approval."
+                  : view === "Benchmarks"
+                    ? "Benchmark explorer"
+                    : view === "Workspace"
+                      ? "Evaluation workspace"
+                      : view === "Comparisons"
+                        ? "Compare the evidence"
+                        : view === "History"
+                          ? "Evaluation history"
+                          : "Human review"}
+              </h1>
               <p>
-                Check only criteria supported by your review. These are
-                attestations, not executed tests.
+                {view === "Overview"
+                  ? "Reproducible checks. Explicit limitations. Decisions you can explain."
+                  : "Measured results and reviewer assessments remain separate."}
               </p>
-              <fieldset disabled={busy}>
-                {selected.checks.map((c) => (
-                  <label className="check" key={c.id}>
-                    <input
-                      type="checkbox"
-                      checked={checks.includes(c.id)}
-                      onChange={() =>
-                        setChecks((s) =>
-                          s.includes(c.id)
-                            ? s.filter((x) => x !== c.id)
-                            : [...s, c.id],
-                        )
-                      }
-                    />
-                    {c.label}
-                  </label>
-                ))}
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={maintainability}
-                    onChange={(e) => setMaintainability(e.target.checked)}
-                  />
-                  Change is scoped, readable, and maintainable
-                </label>
-                <label className="check">
-                  <input
-                    type="checkbox"
-                    checked={documentation}
-                    onChange={(e) => setDocumentation(e.target.checked)}
-                  />
-                  Documentation explains behavior and tradeoffs
-                </label>
-                <label htmlFor="explanation">
-                  Review evidence and verification plan
-                </label>
-                <textarea
-                  id="explanation"
-                  value={explanation}
-                  maxLength={4000}
-                  onChange={(e) => setExplanation(e.target.value)}
-                  placeholder="Explain what supports your assessment (at least 20 characters)."
-                />
-              </fieldset>
+            </div>
+            {view === "Overview" && (
               <button
                 className="primary"
-                disabled={busy || explanation.trim().length < 20}
-                onClick={() => void evaluate()}
+                onClick={() => navigate("Benchmarks")}
               >
-                {busy ? "Evaluating..." : "Generate assessment"}
+                New evaluation <ArrowRight size={16} />
               </button>
-            </article>
+            )}
+          </div>
+          {error && (
+            <div className="error" role="alert">
+              {error}{" "}
+              <button
+                className="secondary"
+                onClick={() => {
+                  void loadCatalog();
+                  setRevision((x) => x + 1);
+                }}
+              >
+                Retry
+              </button>
+            </div>
           )}
-        </div>
-      </section>
-      <section className="panel" aria-live="polite">
-        <span className="eyebrow">ASSESSMENT REPORT</span>
-        {result ? (
-          <>
-            <div className="sectionHead">
-              <h2>
-                {result.score}/100 · {result.grade.replace(/_/g, " ")}
-              </h2>
-              <button className="primary" onClick={download}>
-                <Download size={16} /> Export JSON
-              </button>
-            </div>
-            <div className="stats">
-              {Object.entries(result.dimensions).map(([k, v]) => (
-                <div key={k}>
-                  <b>{v}/100</b>
-                  <span>{k}</span>
+          <div className="boundary">
+            <LockKeyhole size={18} />
+            <span>
+              <strong>Safe fixture mode.</strong> Python fixtures execute.
+              Imported Python, JavaScript and TypeScript code is stored for
+              inspection, with arbitrary execution disabled.
+            </span>
+          </div>
+          {!token && view !== "Human review" && (
+            <details className="connection" open={view === "Workspace"}>
+              <summary>Connect private workspace</summary>
+              <p>
+                {configured
+                  ? "Enter your workspace token to access persisted evaluations."
+                  : "Workspace storage is not configured on this server. The catalog and human review remain available. See README for local setup."}{" "}
+                The token stays in memory for this tab.
+              </p>
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  setToken(draftToken);
+                  setDraftToken("");
+                }}
+              >
+                <label htmlFor="token">Workspace token</label>
+                <input
+                  id="token"
+                  type="password"
+                  autoComplete="off"
+                  value={draftToken}
+                  onChange={(e) => setDraftToken(e.target.value)}
+                  minLength={32}
+                  required
+                />
+                <button className="secondary">Connect</button>
+              </form>
+            </details>
+          )}
+          {token && (
+            <button
+              className="textButton disconnect"
+              onClick={() => {
+                setToken("");
+                setOverview(null);
+                setHistory([]);
+                setComparison([]);
+                setRun(null);
+              }}
+            >
+              Disconnect workspace
+            </button>
+          )}
+          {view === "Overview" && (
+            <>
+              <div className="stats overviewStats">
+                {[
+                  ["Total evaluations", overview?.total],
+                  ["Completed runs", overview?.completed],
+                  [
+                    "Failed / blocked",
+                    overview
+                      ? `${overview.failed} / ${overview.blocked}`
+                      : undefined,
+                  ],
+                  [
+                    "Fixture pass rate",
+                    overview ? metric(overview.pass_rate, "%") : undefined,
+                  ],
+                  ["Security gate failures", overview?.security_gate_failures],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <b>{value ?? "Unavailable"}</b>
+                  </div>
+                ))}
+              </div>
+              <p className="notice">
+                Pass rate counts completed fixture runs with every assertion
+                passing ({overview?.pass_rate_denominator ?? 0} measured runs).
+                It is not model performance or release approval.
+              </p>
+              <section className="panel">
+                <div className="sectionHead">
+                  <h2>Recent evaluations</h2>
+                  <button
+                    className="textButton"
+                    onClick={() => navigate("History")}
+                  >
+                    View history <ArrowRight size={14} />
+                  </button>
                 </div>
-              ))}
+                {runTable(overview?.recent ?? [])}
+              </section>
+              <div className="featureGrid">
+                <article className="panel">
+                  <Beaker />
+                  <h3>Versioned benchmarks</h3>
+                  <p>
+                    Explore {benchmarks.length || "the"} original tasks across
+                    validation, APIs, authorization and regression safety.
+                  </p>
+                </article>
+                <article className="panel">
+                  <ShieldCheck />
+                  <h3>Gates beyond a score</h3>
+                  <p>
+                    Failures override weighted scores. Missing review evidence
+                    prevents release approval.
+                  </p>
+                </article>
+              </div>
+            </>
+          )}
+          {["Benchmarks", "History", "Comparisons"].includes(view) && (
+            <div className="toolbar">
+              {view !== "Comparisons" && (
+                <label className="search">
+                  <Search size={16} />
+                  <input
+                    aria-label="Search"
+                    placeholder={
+                      view === "History"
+                        ? "Search evaluations..."
+                        : "Search benchmarks..."
+                    }
+                    value={query}
+                    onChange={(e) => {
+                      setQuery(e.target.value);
+                      setOffset(0);
+                    }}
+                  />
+                </label>
+              )}
+              <label>
+                Language
+                <select
+                  value={language}
+                  onChange={(e) => {
+                    setLanguage(e.target.value);
+                    setOffset(0);
+                  }}
+                >
+                  <option value="">All languages</option>
+                  {[...new Set(benchmarks.map((t) => t.language))].map((l) => (
+                    <option key={l}>{l}</option>
+                  ))}
+                </select>
+              </label>
+              {view !== "Benchmarks" && (
+                <>
+                  <label>
+                    Task
+                    <select
+                      value={taskFilter}
+                      onChange={(e) => {
+                        setTaskFilter(e.target.value);
+                        setOffset(0);
+                      }}
+                    >
+                      <option value="">All tasks</option>
+                      {benchmarks.map((t) => (
+                        <option value={t.id} key={t.id}>
+                          {t.id}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Dataset
+                    <select
+                      value={version}
+                      onChange={(e) => {
+                        setVersion(e.target.value);
+                        setOffset(0);
+                      }}
+                    >
+                      <option value="">All versions</option>
+                      <option>1.0.0</option>
+                    </select>
+                  </label>
+                </>
+              )}
             </div>
-            <p>
-              <CheckCircle2 size={16} /> Release gates: security{" "}
-              {result.gates.security ? "met" : "unmet"}, regression safety{" "}
-              {result.gates.regression_safety ? "met" : "unmet"}.
-            </p>
-            <p>
-              {result.release_ready
-                ? "Required structural gates satisfied."
-                : "Required structural gates remain unmet."}{" "}
-              This is not a production approval.
-            </p>
-            <p className="notice">{result.limitation}</p>
-          </>
-        ) : (
-          <p>
-            No evaluation generated yet. Complete a task review to create a
-            report.
-          </p>
-        )}
-      </section>
-      <footer>
-        Yeabsira Mesfin · React / TypeScript · Python / FastAPI · Versioned
-        structured evaluation
-      </footer>
-    </main>
+          )}
+          {view === "Benchmarks" && (
+            <>
+              {catalogLoading ? (
+                <p role="status">Loading benchmark catalog...</p>
+              ) : (
+                <div className="benchmarkGrid">
+                  {filtered.map((t) => (
+                    <article className="panel benchmarkCard" key={t.id}>
+                      <div className="sectionHead">
+                        <span className="eyebrow">{t.id}</span>
+                        <span className="badge">{t.language}</span>
+                      </div>
+                      <h2>{t.title}</h2>
+                      <p>{t.description}</p>
+                      <div className="tags">
+                        <span>{t.category}</span>
+                        <span>{t.difficulty}</span>
+                      </div>
+                      <p className="notice">
+                        {t.visible_tests.length} visible ·{" "}
+                        {t.held_out_test_count} held-out · v{t.dataset_version}
+                      </p>
+                      <button className="secondary" onClick={() => choose(t)}>
+                        Inspect task <ArrowRight size={16} />
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              )}
+              {!catalogLoading && !filtered.length && (
+                <p>No benchmarks match these filters.</p>
+              )}
+            </>
+          )}
+          {view === "Workspace" && selected && (
+            <>
+              <div className="workspaceGrid">
+                <section className="panel">
+                  <span className="eyebrow">BENCHMARK CONTRACT</span>
+                  <label>
+                    Task
+                    <select
+                      disabled={busy}
+                      value={selectedId}
+                      onChange={(e) => {
+                        const task = benchmarks.find(
+                          (t) => t.id === e.target.value,
+                        );
+                        if (task) choose(task);
+                      }}
+                    >
+                      {benchmarks.map((t) => (
+                        <option value={t.id} key={t.id}>
+                          {t.id} · {t.title}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <h2>{selected.title}</h2>
+                  <p>{selected.description}</p>
+                  <h3>Input specification</h3>
+                  <pre className="starter">{selected.input_specification}</pre>
+                  <h3>Visible assertions</h3>
+                  {selected.visible_tests.map((t) => (
+                    <div className="visibleTest" key={t.id}>
+                      <b>{t.id}</b>
+                      <pre>
+                        {JSON.stringify(t.input)} → {JSON.stringify(t.expected)}
+                      </pre>
+                    </div>
+                  ))}
+                  <p className="notice">
+                    {selected.held_out_test_count} held-out tests are excluded
+                    from public API responses. This public repository is not a
+                    secret benchmark dataset.
+                  </p>
+                  <details>
+                    <summary>Scoring and sandbox contract</summary>
+                    <pre className="starter">
+                      {JSON.stringify(
+                        {
+                          weights: selected.scoring_criteria,
+                          proposed_sandbox_limits: selected.resource_limits,
+                          timeout_seconds: selected.timeout_seconds,
+                        },
+                        null,
+                        2,
+                      )}
+                    </pre>
+                    <p>
+                      Limits define the future sandbox contract. Trusted bundled
+                      functions run without a candidate sandbox. Security
+                      behavior checks act as a veto.
+                    </p>
+                  </details>
+                </section>
+                <section className="panel">
+                  <span className="eyebrow">SUBMISSION</span>
+                  <h2>Build an evidence record</h2>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      void evaluate();
+                    }}
+                  >
+                    <fieldset disabled={busy}>
+                      <label>
+                        Evaluation mode
+                        <select
+                          value={mode}
+                          onChange={(e) => {
+                            setMode(e.target.value);
+                            setRun(null);
+                          }}
+                        >
+                          <option
+                            value="trusted_fixture"
+                            disabled={
+                              selected.execution_support !== "trusted_fixture"
+                            }
+                          >
+                            Trusted bundled fixture
+                          </option>
+                          <option value="imported">
+                            Imported solution (execution blocked)
+                          </option>
+                        </select>
+                      </label>
+                      {mode === "trusted_fixture" ? (
+                        <>
+                          <label>
+                            Implementation
+                            <select
+                              value={fixture}
+                              onChange={(e) => setFixture(e.target.value)}
+                            >
+                              <option value="reference">
+                                Reference implementation
+                              </option>
+                              <option value="broken">
+                                Intentionally faulty implementation
+                              </option>
+                            </select>
+                          </label>
+                          <p>
+                            Runs fixed, developer-authored Python code against
+                            the selected benchmark. Results are labeled as
+                            bundled fixtures, never as a model's performance.
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <div className="formGrid">
+                            <label>
+                              Model / agent label
+                              <input
+                                required
+                                maxLength={100}
+                                value={model}
+                                onChange={(e) => setModel(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Model version
+                              <input
+                                required
+                                maxLength={100}
+                                value={modelVersion}
+                                onChange={(e) =>
+                                  setModelVersion(e.target.value)
+                                }
+                              />
+                            </label>
+                          </div>
+                          <label>
+                            Provider (optional)
+                            <input
+                              maxLength={100}
+                              value={provider}
+                              onChange={(e) => setProvider(e.target.value)}
+                            />
+                          </label>
+                          <label>
+                            Candidate source
+                            <textarea
+                              required
+                              maxLength={20000}
+                              value={source}
+                              onChange={(e) => setSource(e.target.value)}
+                              spellCheck={false}
+                              placeholder="Paste a solution for storage and limited static inspection"
+                            />
+                          </label>
+                          <div className="formGrid">
+                            <label>
+                              Reported tokens (optional)
+                              <input
+                                type="number"
+                                min="0"
+                                max="100000000"
+                                step="1"
+                                value={tokens}
+                                onChange={(e) => setTokens(e.target.value)}
+                              />
+                            </label>
+                            <label>
+                              Reported cost, USD (optional)
+                              <input
+                                type="number"
+                                min="0"
+                                max="100000"
+                                step="any"
+                                value={cost}
+                                onChange={(e) => setCost(e.target.value)}
+                              />
+                            </label>
+                          </div>
+                          <p className="notice">
+                            Usage is user-supplied and unverified. Leave missing
+                            values blank. Do not submit secrets or private
+                            customer data.
+                          </p>
+                        </>
+                      )}
+                      <button className="primary" disabled={!token || busy}>
+                        {busy
+                          ? "Evaluating and saving..."
+                          : mode === "trusted_fixture"
+                            ? "Run fixture evaluation"
+                            : "Import and inspect"}
+                      </button>
+                    </fieldset>
+                  </form>
+                  <p role="status">
+                    {busy
+                      ? "Running trusted checks or static inspection. Results will appear below."
+                      : !token
+                        ? "Connect a private workspace to save evaluations."
+                        : "Ready for a submission."}
+                  </p>
+                </section>
+              </div>
+              {run && <RunReport run={run} />}
+            </>
+          )}
+          {view === "History" && (
+            <>
+              <section className="panel">
+                {runTable(history)}
+                <div className="pagination">
+                  <button
+                    className="secondary"
+                    disabled={offset === 0}
+                    onClick={() => setOffset((x) => Math.max(0, x - 25))}
+                  >
+                    Previous
+                  </button>
+                  <span>
+                    {total
+                      ? `${offset + 1}–${Math.min(offset + 25, total)} of ${total}`
+                      : "0 evaluations"}
+                  </span>
+                  <button
+                    className="secondary"
+                    disabled={offset + 25 >= total}
+                    onClick={() => setOffset((x) => x + 25)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </section>
+              {run && <RunReport run={run} />}
+            </>
+          )}
+          {view === "Comparisons" && (
+            <section className="panel">
+              <h2>Comparable runs</h2>
+              <p>
+                Grouped by model, provider, task, dataset, execution mode,
+                policy and engine hash. Imported solutions have no measured pass
+                rate. Reported usage is unverified.
+              </p>
+              {!comparison.length ? (
+                <p>
+                  No evaluations match. Connect your workspace and create
+                  evaluations first.
+                </p>
+              ) : (
+                <div className="table">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Submission / task</th>
+                        <th>Evidence</th>
+                        <th>Pass rate</th>
+                        <th>Correctness</th>
+                        <th>Security failures</th>
+                        <th>Regressions</th>
+                        <th>Duration</th>
+                        <th>Tokens / USD</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {comparison.map((c, i) => (
+                        <tr key={i}>
+                          <td>
+                            <strong>{c.model_label}</strong>
+                            <small>
+                              {c.model_version} · {c.task_id} · dataset{" "}
+                              {c.dataset_version}
+                            </small>
+                            <details>
+                              <summary>Reproducibility</summary>
+                              <small>
+                                Provider: {c.provider ?? "Unavailable"}
+                                <br />
+                                Policy: {c.policy_version}
+                                <br />
+                                Engine: {c.engine_sha256}
+                              </small>
+                            </details>
+                          </td>
+                          <td>
+                            {c.mode.replace(/_/g, " ")}
+                            <small>
+                              {c.measured_runs}/{c.runs} measured
+                            </small>
+                          </td>
+                          <td>
+                            {metric(c.pass_rate, "%")}
+                            {c.pass_rate !== null && (
+                              <meter
+                                min={0}
+                                max={100}
+                                value={c.pass_rate}
+                                aria-label={`${c.model_label} pass rate`}
+                              />
+                            )}
+                          </td>
+                          <td>{metric(c.correctness_score)}</td>
+                          <td>{c.security_gate_failures}</td>
+                          <td>{c.regression_failures}</td>
+                          <td>{metric(c.duration_ms, " ms")}</td>
+                          <td>
+                            {metric(c.reported_tokens)} /{" "}
+                            {metric(c.reported_cost_usd)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
+          {view === "Human review" && (
+            <div className="legacy">
+              <ReviewWorkbench />
+            </div>
+          )}
+          <footer>
+            AgentBench Pro · Original benchmark fixtures · Evidence provenance
+            preserved
+          </footer>
+        </main>
+      </div>
+    </div>
   );
 }
