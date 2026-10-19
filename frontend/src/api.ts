@@ -19,10 +19,14 @@ export async function request<T>(
         ...init.headers,
       },
     });
-    if (!response.ok)
-      throw new Error(
-        `Request failed (${response.status}). Check API availability and try again.`,
-      );
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      const message =
+        typeof body?.detail === "string"
+          ? body.detail
+          : `Request failed (${response.status}). Check the input and API availability.`;
+      throw new Error(message);
+    }
     return (await response.json()) as T;
   } catch (error) {
     if (controller.signal.aborted)

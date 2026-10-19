@@ -5,8 +5,8 @@ from .evaluator import evaluate
 from .tasks import TASKS, public_tasks
 import os
 
-app = FastAPI(title="AgentBench SWE API", version="1.0.0")
-app.add_middleware(CORSMiddleware, allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,https://yeabsira-mesfin.github.io").split(","), allow_methods=["GET","POST"], allow_headers=["Content-Type"])
+app = FastAPI(title="AgentBench Pro API", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,https://yeabsira-mesfin.github.io").split(","), allow_methods=["GET","POST"], allow_headers=["Content-Type", "Authorization"])
 
 class Scores(BaseModel):
     correctness: float = Field(ge=0, le=100)
@@ -52,3 +52,17 @@ def structured_score(submission: Submission):
     # structural gates, not claimed hidden executable tests.
     result.update({"task_id": task["id"], "rubric_version": "1.1", "mode": "reviewer_attested", "explanation": submission.explanation, "release_ready": all(c in checks for c in ["c0", "c1", "c2", "c4"]), "gates": {"security": "c2" in checks, "regression_safety": "c4" in checks}, "executed_tests": 0, "limitation": "Reviewer-attested criteria. No candidate code or model was executed."})
     return result
+
+# Pro endpoints are additive; legacy scoring/reviewer endpoints keep their contract.
+from .pro.api import router as pro_router
+app.include_router(pro_router)
+from .pro.limits import ProBodyLimit
+app.add_middleware(ProBodyLimit)
+
+@app.middleware("http")
+async def private_evidence_headers(request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/pro/"):
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
